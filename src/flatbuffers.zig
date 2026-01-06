@@ -784,8 +784,8 @@ pub fn getBitFlagsValue(comptime T: type, flags: T) u64 {
 }
 
 pub const Builder = struct {
-    // pub const block_size = std.heap.page_size_min;
-    pub const block_size = 32;
+    // Use page size for better performance with large data
+    pub const block_size = std.heap.page_size_min;
 
     allocator: std.mem.Allocator,
     offset: i64,
@@ -853,7 +853,7 @@ pub const Builder = struct {
     inline fn fromSOffset(self: *const Builder, soffset: i64) Ref {
         const uoffset: u32 = @intCast(self.capacity() + soffset);
         const block_index = @divTrunc(uoffset, block_size);
-        const block_offset = @mod(uoffset, block_size);
+        const block_offset: u32 = @truncate(@mod(uoffset, block_size));
         const block = self.blocks.items[block_index];
         return Ref{
             .ptr = block.ptr,
@@ -868,9 +868,9 @@ pub const Builder = struct {
             const j = self.blocks.items.len - i - 1;
             const block = self.blocks.items[j];
             if (block.ptr == ref.ptr) {
-                return offset - (block_size - ref.offset);
+                return offset - @as(i64, @intCast(block_size)) + @as(i64, ref.offset);
             } else {
-                offset -= block_size;
+                offset -= @as(i64, @intCast(block_size));
             }
         }
 
@@ -893,14 +893,23 @@ pub const Builder = struct {
 
     fn writeBytes(self: *Builder, value: []const u8, offset: i64) !void {
         const total_size = self.capacity();
-        var written: usize = 0;
-
         const offset_start: usize = @intCast(total_size + offset);
-
         const offset_end = offset_start + value.len;
-        const block_index_start = try std.math.divFloor(usize, offset_start, block_size);
-        const block_index_end = try std.math.divCeil(usize, offset_end, block_size);
 
+        // Fast path: single block write (common case with large block_size)
+        const block_index_start = offset_start / block_size;
+        const block_index_end = (offset_end + block_size - 1) / block_size;
+
+        if (block_index_start + 1 == block_index_end) {
+            // Single block - direct copy
+            const block = self.blocks.items[block_index_start];
+            const chunk_start = offset_start % block_size;
+            @memcpy(block[chunk_start..][0..value.len], value);
+            return;
+        }
+
+        // Multi-block write (rare with large block_size)
+        var written: usize = 0;
         for (block_index_start..block_index_end) |block_index| {
             const block = self.blocks.items[block_index];
             const block_start = block_index * block_size;
@@ -917,6 +926,7 @@ pub const Builder = struct {
 
     fn writeString(self: *Builder, value: []const u8) !i64 {
         const value_len: i64 = @intCast(value.len);
+        const total_len = value.len + 1; // string + null terminator
 
         self.offset = std.mem.alignBackward(i64, self.offset - value_len - 1, @sizeOf(u32));
         self.offset -= @sizeOf(u32);
@@ -928,8 +938,23 @@ pub const Builder = struct {
         writeScalar(u32, self.blocks.items[0][head_start..][0..@sizeOf(u32)], @truncate(value.len));
 
         const value_offset = self.offset + @sizeOf(u32);
-        try self.writeBytes(value, value_offset);
-        try self.writeBytes(&.{0}, value_offset + value_len);
+
+        // Optimize: write string and null terminator together when in same block
+        const total_size = self.capacity();
+        const offset_start: usize = @intCast(total_size + value_offset);
+        const block_index = offset_start / block_size;
+        const chunk_start = offset_start % block_size;
+
+        // Check if string + null fits in single block (common case)
+        if (chunk_start + total_len <= block_size) {
+            const block = self.blocks.items[block_index];
+            @memcpy(block[chunk_start..][0..value.len], value);
+            block[chunk_start + value.len] = 0; // null terminator
+        } else {
+            // Fall back to separate writes for cross-block strings
+            try self.writeBytes(value, value_offset);
+            try self.writeBytes(&.{0}, value_offset + value_len);
+        }
 
         return self.offset;
     }
@@ -990,8 +1015,9 @@ pub const Builder = struct {
 
         // The first thing we need to do is iterate over the fields,
         // write out any string and vector values, and save refs to them.
-        try self.field_refs.resize(self.allocator, field_id);
-        defer self.field_refs.clearRetainingCapacity();
+        // Pre-allocate capacity if needed, then resize - avoids repeated allocations
+        try self.field_refs.ensureTotalCapacity(self.allocator, field_id);
+        self.field_refs.items.len = field_id;
         @memset(self.field_refs.items, 0);
 
         field_id = 0;
@@ -1032,8 +1058,8 @@ pub const Builder = struct {
                                 // }
                             },
                             .@"struct" => {
-                                try self.struct_buffer.resize(self.allocator, vector_t.element_size);
-                                defer self.struct_buffer.clearRetainingCapacity();
+                                try self.struct_buffer.ensureTotalCapacity(self.allocator, vector_t.element_size);
+                                self.struct_buffer.items.len = vector_t.element_size;
 
                                 self.offset = std.mem.alignBackward(i64, self.offset - vector_len, vector_t.minalign);
                                 while (self.capacity() + self.offset < 0)
@@ -1054,8 +1080,8 @@ pub const Builder = struct {
                             },
                             .bit_flags => @compileError("not implemented"),
                             .string => {
-                                try self.vector_refs.resize(self.allocator, value.len);
-                                defer self.vector_refs.clearRetainingCapacity();
+                                try self.vector_refs.ensureTotalCapacity(self.allocator, value.len);
+                                self.vector_refs.items.len = value.len;
                                 for (value, 0..) |item, i|
                                     self.vector_refs.items[i] = try self.writeString(item);
 
@@ -1087,8 +1113,9 @@ pub const Builder = struct {
             }
         }
 
-        try self.vtable.resize(self.allocator, field_id);
-        defer self.vtable.clearRetainingCapacity();
+        // Pre-allocate capacity if needed, then resize - avoids repeated allocations
+        try self.vtable.ensureTotalCapacity(self.allocator, field_id);
+        self.vtable.items.len = field_id;
         @memset(self.vtable.items, 0);
 
         const table_end = self.offset;
@@ -1114,8 +1141,8 @@ pub const Builder = struct {
                         if (wrap(@field(fields, field.name))) |field_value| {
                             const struct_t: *const types.Struct = @field(F, "#type");
 
-                            try self.struct_buffer.resize(self.allocator, struct_t.bytesize);
-                            defer self.struct_buffer.clearRetainingCapacity();
+                            try self.struct_buffer.ensureTotalCapacity(self.allocator, struct_t.bytesize);
+                            self.struct_buffer.items.len = struct_t.bytesize;
 
                             writeStruct(F, self.struct_buffer.items, field_value);
 
