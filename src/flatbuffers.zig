@@ -194,10 +194,10 @@ fn getStructSize(comptime T: type) u32 {
         .array => |info| return info.len * getStructSize(info.child),
         .@"struct" => |info| {
             var size: u32 = 0;
-            inline for (info.fields) |field| {
-                const field_alignment = getStructAlignment(field.type);
+            inline for (info.field_types) |field_type| {
+                const field_alignment = getStructAlignment(field_type);
                 size = std.mem.alignForward(u32, size, field_alignment);
-                size += getStructSize(field.type);
+                size += getStructSize(field_type);
             }
 
             return std.mem.alignForward(u32, size, getStructAlignment(T));
@@ -213,8 +213,8 @@ fn getStructAlignment(comptime T: type) u32 {
         .array => |info| return getStructAlignment(info.child),
         .@"struct" => |info| {
             var max_alignment: u32 = 0;
-            inline for (info.fields) |field|
-                max_alignment = @max(max_alignment, getStructAlignment(field.type));
+            inline for (info.field_types) |field_type|
+                max_alignment = @max(max_alignment, getStructAlignment(field_type));
 
             return max_alignment;
         },
@@ -278,9 +278,9 @@ pub inline fn decodeUnionField(comptime T: type, comptime tag_id: u16, comptime 
 
     const ref_ref = ref_field_ref.uoffset();
 
-    inline for (tag_info.fields) |tag_field| {
-        if (tag_field.value > 0 and tag_field.value == tag_value) {
-            return @unionInit(T, tag_field.name, .{ .@"#ref" = ref_ref });
+    inline for (tag_info.field_names, tag_info.field_values) |field_name, tag_field_value| {
+        if (tag_field_value > 0 and tag_field_value == tag_value) {
+            return @unionInit(T, field_name, .{ .@"#ref" = ref_ref });
         }
     }
 
@@ -956,17 +956,17 @@ pub const Builder = struct {
     }
 
     fn getUnionRef(comptime T: type, value: T) ?struct { tag: u8, ref: Ref } {
-        const fields = switch (@typeInfo(T)) {
-            .@"union" => |info| info.fields,
+        const field_names = switch (@typeInfo(T)) {
+            .@"union" => |info| info.field_names,
             else => @compileError("expected union type"),
         };
 
         if (value == .NONE)
             return null;
 
-        inline for (fields[1..], 1..) |field, tag| {
-            if (std.mem.eql(u8, field.name, @tagName(value))) {
-                const active_field = @field(value, field.name);
+        inline for (field_names[1..], 1..) |field_name, tag| {
+            if (std.mem.eql(u8, field_name, @tagName(value))) {
+                const active_field = @field(value, field_name);
                 return .{ .tag = tag, .ref = @field(active_field, "#ref") };
             }
         }

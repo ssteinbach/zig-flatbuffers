@@ -1,8 +1,8 @@
 .{
     .name = .flatbuffers,
     .fingerprint = 0xaedfda510e7ad736,
-    .minimum_zig_version = "0.16.0",
-    .version = "0.1.2",
+    .minimum_zig_version = "0.17.0",
+    .version = "0.2.2",
     .paths = .{
         "build.zig",
         "build.zig.zon",

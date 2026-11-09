@@ -503,7 +503,7 @@ pub fn main(
     );
 
     const allocator = std.heap.c_allocator;
-    const copy = try allocator.dupeZ(u8, data);
+    const copy = try allocator.dupeSentinel(u8, data, '\0');
     defer allocator.free(copy);
     const schema = try std.zon.parse.fromSliceAlloc(
         flatbuffers.types.Schema,
