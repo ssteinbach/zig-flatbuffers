@@ -760,6 +760,9 @@ pub const Builder = struct {
         errdefer blocks.deinit(allocator);
 
         const block = try allocator.alignedAlloc(u8, .@"8", Builder.block_size);
+        // this ensures that blocks are written with byte-consistent values
+        // (rather than data left over from past allocations)
+        @memset(block, 0);
         errdefer allocator.free(block);
 
         try blocks.append(allocator, block);
@@ -839,6 +842,8 @@ pub const Builder = struct {
 
     fn prepend(self: *Builder) !void {
         const block = try self.allocator.alignedAlloc(u8, .@"8", Builder.block_size);
+        // See `init`: ensure that leftover memory is 0d out before writing
+        @memset(block, 0);
         errdefer self.allocator.free(block);
         try self.blocks.insert(self.allocator, 0, block);
     }
@@ -989,6 +994,7 @@ pub const Builder = struct {
                             },
                             .@"struct" => {
                                 try self.struct_buffer.resize(self.allocator, vector_t.element_size);
+                                @memset(self.struct_buffer.items, 0);
                                 defer self.struct_buffer.clearRetainingCapacity();
 
                                 self.offset = std.mem.alignBackward(i64, self.offset - vector_len, vector_t.minalign);
@@ -1063,6 +1069,8 @@ pub const Builder = struct {
                             const struct_t: *const types.Struct = @field(F, "#type");
 
                             try self.struct_buffer.resize(self.allocator, struct_t.bytesize);
+                            // Struct padding is not written by writeStruct.
+                            @memset(self.struct_buffer.items, 0);
                             defer self.struct_buffer.clearRetainingCapacity();
 
                             writeStruct(F, self.struct_buffer.items, field_value);

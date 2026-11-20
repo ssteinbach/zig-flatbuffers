@@ -50,6 +50,44 @@ test "simple builder" {
     try std.testing.expectEqualSlices(u8, "hello", say);
 }
 
+fn encodeFooBarWithDirtyMemory(junk: u8, out: []u8) ![]const u8 {
+    // Every byte the builder is handed starts out as `junk`, so any byte it
+    // forgets to write (e.g. alignment padding) shows up in the output.
+    var backing: [64 * 1024]u8 = undefined;
+    @memset(&backing, junk);
+    var fba = std.heap.FixedBufferAllocator.init(&backing);
+    const allocator = fba.allocator();
+
+    var builder = try flatbuffers.Builder.init(allocator);
+    defer builder.deinit();
+
+    const ref = try builder.writeTable(simple.FooBar, .{
+        .meal = .Banana,
+        .say = "hello",
+        .height = 19,
+    });
+    try builder.writeRoot(simple.FooBar, ref);
+
+    var writer = std.Io.Writer.fixed(out);
+    try builder.write(&writer);
+    return writer.buffered();
+}
+
+test "builder output does not depend on prior memory contents" {
+    var out_a: [1024]u8 = undefined;
+    var out_b: [1024]u8 = undefined;
+    const a = try encodeFooBarWithDirtyMemory(0x5C, &out_a);
+    const b = try encodeFooBarWithDirtyMemory(0x3A, &out_b);
+
+    // Release builds hand over memory as-is, so unwritten bytes would differ.
+    try std.testing.expectEqualSlices(u8, a, b);
+
+    // Safety-checked builds fill new allocations with `undefined` (0xAA)
+    // inside std.mem.Allocator, so unwritten bytes would be 0xAA.  Nothing
+    // in this table encodes to 0xAA.
+    try std.testing.expect(std.mem.indexOfScalar(u8, a, 0xAA) == null);
+}
+
 test "simple builder with all fields" {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer std.debug.assert(gpa.deinit() == .ok);
